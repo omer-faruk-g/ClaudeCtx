@@ -104,7 +104,8 @@ class TestCommon(Base):
     def test_config(self):
         os.makedirs(os.path.join(self.home, ".claude"))
         with open(os.path.join(self.home, ".claude", "claudectx.json"), "w") as f:
-            json.dump({"soft": 90000, "hard": "x", "step": -5, "idle_minutes": True, "lang": "tr", "bogus": 1}, f)
+            json.dump({"soft": 90000, "hard": "x", "step": -5, "idle_minutes": True, "lang": "tr", "bogus": 1,
+                       "auto_clear": False}, f)
         cfg = _common.load_config(self.home)
         self.assertEqual(cfg["soft"], 90000)
         self.assertEqual(cfg["hard"], 200000)
@@ -112,6 +113,9 @@ class TestCommon(Base):
         self.assertEqual(cfg["idle_minutes"], 60)
         self.assertEqual(cfg["lang"], "tr")
         self.assertNotIn("bogus", cfg)
+        self.assertIs(cfg["auto_clear"], False)
+        self.assertEqual(cfg["autoload_minutes"], 30)
+        self.assertIs(_common.load_config(os.path.join(self.home, "none"))["auto_clear"], True)
 
 
 class TestPromptHook(Base):
@@ -138,7 +142,9 @@ class TestPromptHook(Base):
         c, m = self.run_prompt(130000)
         self.assertIn("soft limit 120K", c)
         self.assertIn(_common.handoff_path(self.cwd, self.home), c)
-        self.assertIn("/clear", m)
+        self.assertIn("s1.jsonl", c)  # transcript path, for the digest
+        self.assertIn('session_id "self"', c)
+        self.assertIn("clear", m)
         self.assertEqual(self.run_prompt(150000), (None, None))  # same level: no repeat
         c, _ = self.run_prompt(210000)
         self.assertIn("hard limit 200K", c)
@@ -159,6 +165,12 @@ class TestPromptHook(Base):
         self.assertIn("90 min ago", c)
         self.assertIn("90", m)
         self.assertEqual(self.run_prompt(40000, ts_offset=90 * 60), (None, None))
+
+    def test_auto_clear_off_asks_user(self):
+        tp = self.transcript([assistant(130000, time.time() - 5)])
+        c, _ = ctx_hook.prompt_event(self.data(tp), dict(CFG, auto_clear=False), home=self.home)
+        self.assertIn("auto_clear is off", c)
+        self.assertNotIn('"self"', c)
 
     def test_turkish_user_message(self):
         cfg = dict(CFG, lang="tr")
@@ -187,9 +199,71 @@ class TestStartHook(Base):
         self.assertIn(p, c)
         self.assertIn("continue", m)
 
+    def test_clear_loads_fresh_note_in_full(self):
+        p = self.write_handoff(text="# Handoff\nGoal: fix the login bug\nUser rules: never push\n")
+        c, m = ctx_hook.start_event({"cwd": self.cwd, "source": "clear"}, CFG, home=self.home)
+        self.assertIn("core context", c)
+        self.assertIn("User rules: never push", c)
+        self.assertIn(p, c)
+        self.assertIn("loaded", m)
+
+    def test_startup_or_older_note_only_points(self):
+        self.write_handoff()
+        c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "startup"}, CFG, home=self.home)
+        self.assertNotIn("core context", c)
+        self.assertIn("fix the login bug", c)
+        self.write_handoff(age_days=1 / 24)  # one hour old: not written for this /clear
+        c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "clear"}, CFG, home=self.home)
+        self.assertNotIn("core context", c)
+
+    def test_long_note_is_capped(self):
+        self.write_handoff(text="Goal: x\n" + "y" * 20000)
+        c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "clear"}, CFG, home=self.home)
+        self.assertLess(len(c), 9000)
+        self.assertIn("cut at", c)
+
     def test_old_handoff_ignored(self):
         self.write_handoff(age_days=8)
         self.assertEqual(ctx_hook.start_event({"cwd": self.cwd}, CFG, home=self.home), (None, None))
+
+
+def user(content, ts, **flags):
+    return dict({"type": "user", "timestamp": iso(ts), "message": {"role": "user", "content": content}}, **flags)
+
+
+class TestDigest(Base):
+    def test_only_the_users_own_words(self):
+        t = 1_800_000_000
+        tp = self.transcript([
+            user("<system-reminder>injected</system-reminder>", t),
+            user("never push without yükle", t + 1),
+            user([{"type": "text", "text": "<system-reminder>x</system-reminder>use tr notices"}], t + 2),
+            user([{"type": "tool_result", "tool_use_id": "a", "content": "file text"}], t + 3),
+            user("skill body", t + 4, isMeta=True),
+            user("This session is being continued from a previous conversation...", t + 5, isCompactSummary=True),
+            user([{"type": "text", "text": "[Request interrupted by user]"}], t + 6),
+            user("subagent prompt", t + 7, isSidechain=True),
+            user("use tr notices", t + 8),
+            user("<pasted_content id=\"1\">\nlong paste " + "z" * 500 + "\n</pasted_content>", t + 9),
+        ])
+        lines = ctx_hook.digest(tp)
+        self.assertEqual(len(lines), 3)  # the consecutive duplicate is dropped
+        self.assertTrue(lines[0].endswith("never push without yükle"))
+        self.assertTrue(lines[1].endswith("use tr notices"))
+        self.assertIn("long paste", lines[2])
+        self.assertTrue(lines[2].endswith("…"))
+
+    def test_cap_keeps_oldest_and_newest(self):
+        t = 1_800_000_000
+        tp = self.transcript([user(f"message {i} " + "w" * 200, t + i) for i in range(200)])
+        lines = ctx_hook.digest(tp, cap=3000)
+        self.assertLessEqual(sum(len(x) + 1 for x in lines), 3200)
+        self.assertIn("message 0 ", lines[0])
+        self.assertIn("message 199 ", lines[-1])
+        self.assertTrue(any("omitted" in x for x in lines))
+
+    def test_missing_transcript(self):
+        self.assertEqual(ctx_hook.digest(os.path.join(self.home, "nope.jsonl")), [])
 
 
 class TestHookProcess(Base):
@@ -218,6 +292,14 @@ class TestHookProcess(Base):
         self.assertEqual(r.stdout, "")
         r = self.run_hook("start", json.dumps({"cwd": self.cwd, "source": "clear"}))
         self.assertEqual(json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"], "SessionStart")
+
+    def test_digest_mode(self):
+        tp = self.transcript([user("keep answers short", 1_800_000_000)])
+        env = dict(os.environ, CLAUDECTX_HOME=self.home)
+        r = subprocess.run([sys.executable, os.path.join(SCRIPTS, "ctx_hook.py"), "digest", "--transcript", tp],
+                           capture_output=True, text=True, encoding="utf-8", env=env, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("keep answers short", r.stdout)
 
     def test_path_mode(self):
         env = dict(os.environ, CLAUDECTX_HOME=self.home)
@@ -250,6 +332,14 @@ class TestReport(Base):
         self.assertEqual(s["idle_cache_misses"], 1)
         self.assertEqual(s["peak"], 240000)
         self.assertLess(out["what_if"]["input_side_total"], out["input_side_total"])
+
+    def test_copied_transcript_counted_once(self):
+        root, _ = self.projects()
+        os.makedirs(os.path.join(root, "C--moved"))
+        shutil.copy(os.path.join(root, "C--proj", "s1.jsonl"), os.path.join(root, "C--moved", "s1.jsonl"))
+        reqs = list(_common.iter_requests(root))
+        self.assertEqual(sum(not r["compact"] for r in reqs), 12)
+        self.assertEqual(sum(r["compact"] for r in reqs), 1)
 
     def test_simulation_never_exceeds_actual(self):
         reqs = [{"ctx": c, "compact": False} for c in (60000, 100000, 140000, 180000, 220000)]

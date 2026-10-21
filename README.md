@@ -1,20 +1,21 @@
 # ClaudeCtx
 
-ClaudeCtx is a [Claude Code](https://code.claude.com) skill that keeps the conversation context small. Claude Code sends the whole conversation with every request, so a session that runs for days costs more on every message, even a one-line question. Claude cannot see how big its own context is. ClaudeCtx gives it that number, and has it move work into fresh sessions at task boundaries, with a short handoff note so nothing important is lost. It also shows what your skills and plugins cost on every request.
+ClaudeCtx is a [Claude Code](https://code.claude.com) skill that keeps the conversation context small. Claude Code sends the whole conversation with every request, so a session that runs for days costs more on every message, even a one-line question. Claude cannot see how big its own context is. ClaudeCtx gives it that number. At task boundaries Claude condenses the whole session into a short core-context note and clears the session itself; right after the clear, the note is loaded back, so nothing important is lost. It also shows what your skills and plugins cost on every request.
 
 ## What it does
 
 | Part | What happens |
 |---|---|
-| Context meter (`UserPromptSubmit` hook) | Reads the size of the last request from the transcript's `usage` fields. Below the soft limit it prints nothing, so it costs 0 tokens. At 120K it tells Claude to hand off at the next task boundary; at 200K, to finish the current step and hand off; then again every 50K. Each level is reported once per session. You see a one-line notice too. |
+| Context meter (`UserPromptSubmit` hook) | Reads the size of the last request from the transcript's `usage` fields. Below the soft limit it prints nothing, so it costs 0 tokens. At 120K it tells Claude to hand off when the current task is done; at 200K, to finish the current step and hand off; then again every 50K. Each level is reported once per session. You see a one-line notice too. |
 | Idle-gap note | If your last reply was 60+ minutes ago and the context is 60K+, the prompt cache has likely expired and the message was re-sent uncached. Claude suggests a fresh session if you are starting something new. |
-| Handoff + `/clear` | At a task boundary (never mid-edit) Claude writes a note of at most 40 lines (goal, status, changed files, your rules, decisions, open issues, next step, key commands) to `~/.claude/handoffs/<folder>.md` and asks you to run `/clear`. |
-| Resume (`SessionStart` hook, `startup\|clear`) | If a handoff for this folder is less than 7 days old, the new session gets a one-line pointer to it. Say "devam" or "continue" and Claude reads the note instead of re-exploring. |
+| Core context | At a task boundary (never mid-edit) Claude runs `ctx_hook.py digest`, which prints every message you typed in the session, including the parts compaction already dropped, so your rules survive verbatim. It then writes a note of at most 40 lines (goal, status, changed files, your rules, decisions, open issues, next step, key commands) to `~/.claude/handoffs/<folder>.md`. |
+| Automatic clear | In the Claude desktop app, Claude then clears its own session with the app's `clear_session` tool (`session_id: "self"`); the app asks you to approve, and the old conversation stays available under "Resume previous session". In the terminal or an IDE, Claude asks you to run `/clear`. Set `"auto_clear": false` to always be asked. |
+| Reload (`SessionStart` hook, `startup\|clear`) | Right after `/clear`, a note written in the last 30 minutes is loaded in full: the new session starts with the core context and nothing else. An older note (up to 7 days) gets a one-line pointer; say "devam" or "continue" and Claude reads it instead of re-exploring. |
 | Working rules | Read big files by range, cap command output, hand verbose jobs to a subagent, keep one task per session. |
 | `ctx_report.py` | Context per request (median, p90, max), sessions with their span and idle cache misses, and a what-if: the input-side total if a handoff + `/clear` had happened at a given size. |
 | `skill_audit.py` | What each skill adds to the listing that is sent on every request, how often it was used, and a suggested `skillOverrides` block. It also lists what the newest session received at startup, including plugin skills grouped by plugin. It only prints; it changes nothing. |
 
-The skill itself is small: a 350-character listing entry, and a 2.9K-character body that loads only when a hook message or your request needs it.
+The skill itself is small: a 460-character listing entry, and a 3.8K-character body that loads only when a hook message or your request needs it.
 
 ## Install
 
@@ -37,10 +38,10 @@ Then add the two hooks to `~/.claude/settings.json`. Merge them with any hooks y
 }
 ```
 
-Optional settings in `~/.claude/claudectx.json` (defaults shown; `lang` is `en` or `tr` for the notices you see):
+Optional settings in `~/.claude/claudectx.json` (defaults shown; `lang` is `en` or `tr` for the notices you see; `autoload_minutes` is how fresh a note must be to load in full after `/clear`):
 
 ```json
-{ "soft": 120000, "hard": 200000, "step": 50000, "idle_minutes": 60, "idle_min_context": 60000, "handoff_max_age_days": 7, "lang": "en" }
+{ "soft": 120000, "hard": 200000, "step": 50000, "idle_minutes": 60, "idle_min_context": 60000, "handoff_max_age_days": 7, "autoload_minutes": 30, "auto_clear": true, "lang": "en" }
 ```
 
 Measure before and after:
@@ -53,7 +54,7 @@ python ~/.claude/skills/claudectx/scripts/ctx_report.py --since 2026-10-01 --cle
 python ~/.claude/skills/claudectx/scripts/skill_audit.py
 ```
 
-Tests: `python ~/.claude/skills/claudectx/tests/test_claudectx.py` (26 tests, stdlib only).
+Tests: `python ~/.claude/skills/claudectx/tests/test_claudectx.py` (34 tests, stdlib only).
 
 ## Example (one user's transcripts, 880 requests)
 
@@ -68,7 +69,8 @@ Run `ctx_report.py` and `skill_audit.py` on your own transcripts; your numbers w
 
 ## Limits
 
-- Claude cannot run `/clear` itself. You type it.
+- Claude can clear its own session only in the Claude desktop app, through the app's `clear_session` tool, and the app asks you to approve each clear (auto mode may decide without asking). In the terminal and IDEs you type `/clear`.
+- The digest relies on the transcript's `isMeta` and `isCompactSummary` fields to skip injected text. They are observed, not documented.
 - A handoff note drops detail. After `/clear`, Claude may have to re-read some files, so real savings are below the what-if.
 - The meter reads the transcript, which can lag the conversation by a turn. Treat the number as approximate.
 - `skill_audit.py`'s startup section reads transcript attachments (`skill_listing`, `deferred_tools_delta`, …). That format is observed, not documented, and may change.
@@ -90,7 +92,8 @@ From the Claude Code docs:
 ClaudeCtx, Claude Code'da bağlamı küçük tutan bir skill. Claude Code her istekte konuşmanın tamamını yeniden gönderir; günlerce süren bir oturumda tek satırlık bir soru bile tüm geçmişin maliyetini taşır. Claude kendi bağlamının ne kadar büyük olduğunu göremez. ClaudeCtx:
 
 - Bir hook ile bağlam boyutunu Claude'a ve sana bildirir. 120K altında hiçbir şey yazmaz, yani maliyeti 0'dır. 120K'da "görev sınırında devret", 200K'da "bu adımı bitir ve devret" der.
-- Görev sınırında Claude en fazla 40 satırlık bir devir notu yazar ve senden `/clear` yazmanı ister. Yeni oturum bu notu bulur; "devam" dersen Claude baştan keşfetmek yerine notu okur.
+- Görev sınırında Claude oturumda yazdığın tüm mesajları okur (sıkıştırmanın attığı kısımlar dahil), en fazla 40 satırlık bir öz bağlam notu yazar ve oturumu kendisi temizler. Bunu masaüstü uygulamasında `clear_session` aracıyla yapar; uygulama her temizlik için onayını ister. Terminalde `/clear`'ı sen yazarsın.
+- `/clear`'dan hemen sonra not yeni oturuma tamamen yüklenir: yeni oturum yalnızca öz bağlamla başlar. Daha eski bir not için yalnızca hatırlatma çıkar; "devam" dersen Claude notu okur.
 - 60 dakikadan uzun aradan sonra önbelleğin büyük olasılıkla soğuduğunu söyler.
 - `ctx_report.py` gerçek kullanımını ölçer ve "şu eşikte temizleseydin ne olurdu" tahmini verir.
 - `skill_audit.py` her skill'in ve eklentinin her istekte ne kadar yer kapladığını gösterir. Ayarlarına hiçbir şey yazmaz.
