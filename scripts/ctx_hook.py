@@ -7,7 +7,7 @@ fields and speaks only when it matters, so below the soft limit it costs 0 token
 
   ctx_hook.py prompt   UserPromptSubmit: warn once per level (soft, hard, then every `step`),
                        and note a likely prompt-cache miss after an idle gap
-  ctx_hook.py start    SessionStart (startup|clear): right after /clear, load a just-written handoff
+  ctx_hook.py start    SessionStart (startup|clear): in the first session after a handoff is written, load it
                        in full (the core context); otherwise point Claude to a recent one
   ctx_hook.py path     print the handoff path for the current folder (or --cwd DIR)
   ctx_hook.py digest   print the user's own messages from a transcript (--transcript, default: newest),
@@ -56,7 +56,7 @@ CLAUDE_HARD = ("ClaudeCtx: context is ~{k}K tokens (hard limit {hard}K); every r
 CLEAR_SELF = ("Then clear the session yourself as the last action of that turn: clear_session tool with "
               "session_id \"self\" (Claude desktop app); without that tool, ask the user to run /clear.")
 CLEAR_ASK = "Then ask the user to run /clear (auto_clear is off)."
-CLAUDE_LOAD = ("ClaudeCtx core context: the handoff note written at {when}, just before /clear ({path}). It "
+CLAUDE_LOAD = ("ClaudeCtx core context: the handoff note written at {when}, just before the session was cleared ({path}). It "
                "replaces the cleared conversation. Treat it as the current state, follow its User rules, and "
                "continue from its Next step when the user continues. Re-read only files the next step touches.\n\n{note}")
 NOTE_CAP = 7000  # hook output is capped at 10,000 chars; a 40-line note fits easily
@@ -70,6 +70,29 @@ CLAUDE_START = ("ClaudeCtx: a handoff note from {when} exists for this folder: {
 def state_file(session_id, home=None):
     sid = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id or "nosession"))[:80] or "nosession"
     return os.path.join(home_dir(home), ".claude", "claudectx-state", sid + ".json")
+
+
+def loaded_file(note_path, home=None):
+    name = os.path.splitext(os.path.basename(note_path))[0]
+    return os.path.join(home_dir(home), ".claude", "claudectx-state", "loaded-" + name + ".json")
+
+
+def claim_autoload(note_path, mtime, home=None):
+    """True the first time this version of the note is seen, so only one session loads it in full."""
+    marker = loaded_file(note_path, home)
+    try:
+        with open(marker, encoding="utf-8") as f:
+            if json.load(f).get("mtime") == mtime:
+                return False
+    except (OSError, ValueError, AttributeError):
+        pass  # no marker yet, or a broken one: this version was not loaded
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as f:
+            json.dump({"mtime": mtime}, f)
+    except OSError as e:  # still load it; the next session may load it again
+        print(f"claudectx start: cannot write {marker}: {e}", file=sys.stderr)
+    return True
 
 
 def level_for(tokens, cfg):
@@ -157,7 +180,9 @@ def start_event(data, cfg, home=None, now=None):
         return None, None
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
     lang = MSG.get(cfg.get("lang", "en"), MSG["en"])
-    if data.get("source") == "clear" and now - mtime <= cfg["autoload_minutes"] * 60:
+    # /clear sends "clear"; the desktop app's clear_session opens a new session, which sends "startup".
+    if (data.get("source") in ("startup", "clear") and now - mtime <= cfg["autoload_minutes"] * 60
+            and claim_autoload(path, mtime, home)):
         if len(note) > NOTE_CAP:
             note = note[:NOTE_CAP] + f"\n[... cut at {NOTE_CAP} chars; read the rest from the file]"
         return (CLAUDE_LOAD.format(when=when, path=path, note=note.strip()),
@@ -224,7 +249,7 @@ def main(argv=None):
         print("\n".join(lines) if lines else "(none found)")
         return 0
     try:
-        data = json.loads(sys.stdin.read() or "{}")
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8", errors="replace") or "{}")
         if a.mode == "prompt":
             ctx, msg = prompt_event(data, cfg)
             event = "UserPromptSubmit"

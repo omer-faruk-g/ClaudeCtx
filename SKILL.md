@@ -30,8 +30,8 @@ Do this when a ClaudeCtx hook reported the soft limit and the current task is do
    - Without that tool (terminal, IDE), or when the hook said auto_clear is off: ask the user to run `/clear`.
    - If the user declines, continue here and do not offer again until the hook reports a higher level.
 
-## 2. After /clear
-The SessionStart hook loads a note written in the last 30 minutes in full: that is the core context. Trust it, follow its User rules, continue from Next step when the user continues, and re-read only the files that step touches. An older note is only pointed to: read it if the user continues that work ("devam", "continue"), otherwise ignore it. When the note's task is finished, overwrite the note with the new state or delete it.
+## 2. After the clear
+The first session that starts after the note was written (after /clear, or the new session the desktop app's clear_session opens) gets the note in full if it is under 30 minutes old: that is the core context. Trust it, follow its User rules, continue from Next step when the user continues, and re-read only the files that step touches. An older note is only pointed to: read it if the user continues that work ("devam", "continue"), otherwise ignore it. When the note's task is finished, overwrite the note with the new state or delete it.
 
 ## 3. While working (slows context growth)
 - Read large files by range (offset/limit) or with Grep. Do not re-read files that have not changed.

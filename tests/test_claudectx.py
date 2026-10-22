@@ -207,12 +207,24 @@ class TestStartHook(Base):
         self.assertIn(p, c)
         self.assertIn("loaded", m)
 
-    def test_startup_or_older_note_only_points(self):
-        self.write_handoff()
+    def test_startup_loads_fresh_note_once(self):
+        # The desktop app's clear_session opens a new session, which reports source "startup".
+        self.write_handoff(age_days=1 / 86400)
+        c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "startup"}, CFG, home=self.home)
+        self.assertIn("core context", c)
+        c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "startup"}, CFG, home=self.home)
+        self.assertNotIn("core context", c)  # a later session in this folder only gets the pointer
+        self.assertIn("fix the login bug", c)
+        self.write_handoff(text="# Handoff\nGoal: next task\n")  # a rewritten note loads again
+        c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "clear"}, CFG, home=self.home)
+        self.assertIn("core context", c)
+        self.assertIn("next task", c)
+
+    def test_older_note_only_points(self):
+        self.write_handoff(age_days=1 / 24)  # one hour old: not written for this clear
         c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "startup"}, CFG, home=self.home)
         self.assertNotIn("core context", c)
         self.assertIn("fix the login bug", c)
-        self.write_handoff(age_days=1 / 24)  # one hour old: not written for this /clear
         c, _ = ctx_hook.start_event({"cwd": self.cwd, "source": "clear"}, CFG, home=self.home)
         self.assertNotIn("core context", c)
 

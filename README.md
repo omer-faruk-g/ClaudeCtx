@@ -10,7 +10,7 @@ ClaudeCtx is a [Claude Code](https://code.claude.com) skill that keeps the conve
 | Idle-gap note | If your last reply was 60+ minutes ago and the context is 60K+, the prompt cache has likely expired and the message was re-sent uncached. Claude suggests a fresh session if you are starting something new. |
 | Core context | At a task boundary (never mid-edit) Claude runs `ctx_hook.py digest`, which prints every message you typed in the session, including the parts compaction already dropped, so your rules survive verbatim. It then writes a note of at most 40 lines (goal, status, changed files, your rules, decisions, open issues, next step, key commands) to `~/.claude/handoffs/<folder>.md`. |
 | Automatic clear | In the Claude desktop app, Claude then clears its own session with the app's `clear_session` tool (`session_id: "self"`); the app asks you to approve, and the old conversation stays available under "Resume previous session". In the terminal or an IDE, Claude asks you to run `/clear`. Set `"auto_clear": false` to always be asked. |
-| Reload (`SessionStart` hook, `startup\|clear`) | Right after `/clear`, a note written in the last 30 minutes is loaded in full: the new session starts with the core context and nothing else. An older note (up to 7 days) gets a one-line pointer; say "devam" or "continue" and Claude reads it instead of re-exploring. |
+| Reload (`SessionStart` hook, `startup\|clear`) | Right after `/clear`, or in the new session the desktop app's `clear_session` opens, a note written in the last 30 minutes is loaded in full: the new session starts with the core context and nothing else. Only the first session after the note was written gets it in full; later ones get the pointer. An older note (up to 7 days) gets a one-line pointer; say "devam" or "continue" and Claude reads it instead of re-exploring. |
 | Working rules | Read big files by range, cap command output, hand verbose jobs to a subagent, keep one task per session. |
 | `ctx_report.py` | Context per request (median, p90, max), sessions with their span and idle cache misses, and a what-if: the input-side total if a handoff + `/clear` had happened at a given size. |
 | `skill_audit.py` | What each skill adds to the listing that is sent on every request, how often it was used, and a suggested `skillOverrides` block. It also lists what the newest session received at startup, including plugin skills grouped by plugin. It only prints; it changes nothing. |
@@ -38,7 +38,7 @@ Then add the two hooks to `~/.claude/settings.json`. Merge them with any hooks y
 }
 ```
 
-Optional settings in `~/.claude/claudectx.json` (defaults shown; `lang` is `en` or `tr` for the notices you see; `autoload_minutes` is how fresh a note must be to load in full after `/clear`):
+Optional settings in `~/.claude/claudectx.json` (defaults shown; `lang` is `en` or `tr` for the notices you see; `autoload_minutes` is how fresh a note must be to load in full after a clear):
 
 ```json
 { "soft": 120000, "hard": 200000, "step": 50000, "idle_minutes": 60, "idle_min_context": 60000, "handoff_max_age_days": 7, "autoload_minutes": 30, "auto_clear": true, "lang": "en" }
