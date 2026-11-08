@@ -54,7 +54,7 @@ python ~/.claude/skills/claudectx/scripts/ctx_report.py --since 2026-10-01 --cle
 python ~/.claude/skills/claudectx/scripts/skill_audit.py
 ```
 
-Tests: `python ~/.claude/skills/claudectx/tests/test_claudectx.py` (34 tests, stdlib only).
+Tests: `python ~/.claude/skills/claudectx/tests/test_claudectx.py` (38 tests, stdlib only).
 
 ## Example (one user's transcripts, 880 requests)
 
