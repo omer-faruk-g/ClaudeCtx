@@ -24,8 +24,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _common import (handoff_path, home_dir, last_context, load_config, newest_transcript,  # noqa: E402
-                     user_messages)
+from _common import (handoff_path, home_dir, last_context, load_config, long_path,  # noqa: E402
+                     newest_transcript, user_messages)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -70,6 +70,35 @@ CLAUDE_START = ("ClaudeCtx: a handoff note from {when} exists for this folder: {
 def state_file(session_id, home=None):
     sid = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id or "nosession"))[:80] or "nosession"
     return os.path.join(home_dir(home), ".claude", "claudectx-state", sid + ".json")
+
+
+BOUNDARY_RE = re.compile(rb'"subtype":\s*"compact_boundary"')
+
+
+def compacted_since(path, offset, chunk=1 << 20):
+    """(compacted, size): was a compact_boundary entry appended to the transcript after byte `offset`?
+
+    Auto-compaction can run mid-turn and the context can grow back past the warned level before the
+    next prompt, so a prompt below the soft limit is not always seen. Only the bytes appended since
+    the last prompt are read, which keeps this cheap on 100 MB transcripts.
+    """
+    try:
+        f = open(long_path(path), "rb")
+    except (OSError, TypeError, ValueError):
+        return False, None
+    with f:
+        size = f.seek(0, os.SEEK_END)
+        if not isinstance(offset, int) or not 0 <= offset <= size:
+            return False, size  # no offset yet (first warning, older state) or a replaced file: re-sync
+        f.seek(offset)
+        tail = b""
+        while True:
+            buf = f.read(chunk)
+            if not buf:
+                return False, size
+            if BOUNDARY_RE.search(tail + buf):
+                return True, size
+            tail = buf[-64:]
 
 
 def loaded_file(note_path, home=None):
@@ -118,14 +147,19 @@ def prompt_event(data, cfg, home=None, now=None):
     sf = state_file(data.get("session_id"), home)
     try:
         with open(sf, encoding="utf-8") as f:
-            warned = int(json.load(f).get("level", 0))
+            st = json.load(f)
+        warned, offset = int(st.get("level", 0)), st.get("offset")
     except (OSError, ValueError, TypeError, AttributeError):
-        warned = 0
+        warned, offset = 0, None
     level = level_for(tokens, cfg)
-    if (level == 0 and warned != 0) or level > warned:  # reset after compaction/clear, or record a new level
+    if warned or level:  # below the soft limit with nothing warned: no state, no write
+        compacted, size = compacted_since(data.get("transcript_path"), offset if warned else None)
+        if compacted:
+            warned = 0  # compaction since the last prompt: the levels start over
         os.makedirs(os.path.dirname(sf), exist_ok=True)
-        with open(sf, "w", encoding="utf-8") as f:
-            json.dump({"level": level, "tokens": tokens, "at": int(now)}, f)
+        with open(sf, "w", encoding="utf-8") as f:  # a new level, a reset, or just the read position
+            json.dump({"level": level if (level > warned or level == 0) else warned,
+                       "tokens": tokens, "at": int(now), "offset": size}, f)
     if level > warned:
         where = dict(k=k, path=path, transcript=data.get("transcript_path") or "(newest)",
                      clear=CLEAR_SELF if cfg.get("auto_clear", True) else CLEAR_ASK)

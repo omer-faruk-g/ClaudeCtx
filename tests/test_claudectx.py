@@ -93,6 +93,20 @@ class TestCommon(Base):
         tp = self.transcript([assistant(150000, now - 1)] + filler)
         self.assertEqual(_common.last_context(tp)[0], 150100)
 
+    def test_newest_transcript_long_path(self):
+        # 2026-11-08: a Store-app LocalCache project dir put a transcript past MAX_PATH and digest crashed.
+        root = os.path.join(self.home, ".claude", "projects")
+        old = os.path.join(root, "short", "a.jsonl")
+        new = os.path.join(root, "C-" + "x" * (228 - len(root)), "b-" + "y" * 40 + ".jsonl")
+        self.assertGreater(len(new), 260)
+        for p, age in ((old, 100), (new, 0)):
+            os.makedirs(_common.long_path(os.path.dirname(p)), exist_ok=True)
+            with open(_common.long_path(p), "w", encoding="utf-8") as f:
+                f.write("{}\n")
+            t = time.time() - age
+            os.utime(_common.long_path(p), (t, t))
+        self.assertEqual(_common.newest_transcript(root), new)
+
     def test_project_key(self):
         short = _common.project_key("C:/Users/HP/Desktop/PhotonAI")
         self.assertNotIn(":", short)
@@ -155,6 +169,23 @@ class TestPromptHook(Base):
         self.assertIsNotNone(self.run_prompt(130000)[0])
         self.assertEqual(self.run_prompt(30000), (None, None))
         self.assertIsNotNone(self.run_prompt(125000)[0])
+
+    def test_reset_after_compaction_mid_turn(self):
+        # 2026-11-07: auto-compaction ran mid-turn and the context grew back past the warned level
+        # before the next prompt, so the below-soft reset never fired and the hook went silent.
+        now = time.time()
+        tp = self.transcript([assistant(254000, now - 30)])
+
+        def run():
+            return ctx_hook.prompt_event(self.data(tp), CFG, home=self.home, now=now)
+
+        self.assertIn("hard limit", run()[0])
+        self.assertEqual(run(), (None, None))
+        with open(tp, "a", encoding="utf-8", newline="\n") as f:
+            for e in (compact(60000, now - 20), assistant(230000, now - 10)):
+                f.write(json.dumps(e) + "\n")
+        self.assertIn("hard limit", run()[0])
+        self.assertEqual(run(), (None, None))  # once per compaction, not on every prompt
 
     def test_sessions_are_independent(self):
         self.assertIsNotNone(self.run_prompt(130000, session="a")[0])

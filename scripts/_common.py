@@ -160,7 +160,13 @@ def newest_transcript(projects_root):
     """The most recently written transcript: while a session runs, that is usually its own."""
     import glob
     paths = glob.glob(os.path.join(projects_root, "*", "*.jsonl"))
-    return max(paths, key=os.path.getmtime) if paths else None
+
+    def mtime(p):  # a long project dir can push the file past MAX_PATH; an unreadable file ranks last
+        try:
+            return os.path.getmtime(long_path(p))
+        except OSError:
+            return -1.0
+    return max(paths, key=mtime) if paths else None
 
 
 _REMINDER = re.compile(r"<(system-reminder|local-command-[a-z]+)>.*?</\1>", re.S)
